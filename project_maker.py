@@ -185,15 +185,18 @@ def parse_compilation(compiler: str, args: list[str], cwd: Path) -> Compilation:
             if key in ("define", "d"):
                 unit.defines.extend(v for v in re.split("[;,]", value) if v)
             elif key in ("reference", "r"):
-                alias, equal, path = value.partition("=")
-                unit.references.append((alias if equal else "", str(absolute(path if equal else value, cwd))))
+                for reference in value.split(";"):
+                    if not reference:
+                        raise GenerationError("Empty C# assembly reference.")
+                    alias, equal, path = reference.partition("=")
+                    unit.references.append((alias if equal else "", str(absolute(path if equal else reference, cwd))))
             elif key == "out":
                 unit.output = str(absolute(value, cwd))
             elif key == "langversion":
                 unit.standard = value
             elif key == "platform":
                 unit.platform = value
-            elif key == "target":
+            elif key in ("target", "t"):
                 unit.target = value.lower()
             elif key == "unsafe+" or key == "unsafe":
                 unit.unsafe = True
@@ -698,8 +701,16 @@ def framework_from_log(unit: Compilation) -> str:
         match = re.search(r"(?i)[\\/]\.NETFramework[\\/]v(\d+(?:\.\d+)+)[\\/]", path)
         if match:
             frameworks.add("v" + match[1])
+    for source in unit.sources:
+        if source.name.casefold() != "assemblyinfo.cs" or not source.is_file():
+            continue
+        frameworks.update(re.findall(
+            r'\bTargetFramework(?:Attribute)?\s*\(\s*"\.NETFramework,Version=(v\d+(?:\.\d+)+)"',
+            read_text(source),
+        ))
     if len(frameworks) != 1:
-        raise GenerationError("Cannot identify a single .NET Framework version from C# references. "
+        raise GenerationError("Cannot identify a single .NET Framework version from C# references "
+                              "and logged AssemblyInfo.cs inputs. "
                               "Supply --framework (for example v4.8).")
     return frameworks.pop()
 

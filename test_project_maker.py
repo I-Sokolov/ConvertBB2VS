@@ -114,6 +114,25 @@ class ProjectMakerTests(unittest.TestCase):
         with self.assertRaisesRegex(pm.GenerationError, "Conflicting"):
             pm.cpp_project("test", [first, second], self.root, "bb", None)
 
+    def test_direct_csharp_reference_list_target_and_generated_framework(self):
+        source = self.write("AssemblyInfo.cs",
+            '[assembly:System.Runtime.Versioning.TargetFrameworkAttribute('
+            '".NETFramework,Version=v4.8", FrameworkDisplayName = ".NET Framework 4.8")]')
+        unit = pm.parse_compilation("csc", [
+            "-r:first.dll;alias=second.dll;third.dll", "-t:exe", str(source)
+        ], self.root)
+        self.assertEqual(unit.references, [
+            ("", str(self.root / "first.dll")),
+            ("alias", str(self.root / "second.dll")),
+            ("", str(self.root / "third.dll")),
+        ])
+        self.assertEqual(pm.framework_from_log(unit), "v4.8")
+        root = ET.fromstring(pm.cs_project("direct", unit, self.root, "bb", None, None)["direct.csproj"])
+        self.assertEqual(root.find(f".//{{{pm.NS}}}OutputType").text, "Exe")
+        unit.references.append(("", r"C:\Ref\.NETFramework\v4.7.2\System.dll"))
+        with self.assertRaisesRegex(pm.GenerationError, "single .NET Framework"):
+            pm.framework_from_log(unit)
+
     def test_c_sources_compiled_as_cpp_are_preserved(self):
         unit = pm.parse_compilation("cl", ["/TP", "/std:c++20", "a.c", "/Tcother.cpp"], self.root)
         root = ET.fromstring(pm.cpp_project("test", [unit], self.root, "bb", None)["test.vcxproj"])

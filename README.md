@@ -58,7 +58,9 @@ migrated. A conflicting destination stops generation without overwriting it.
   C++/CLI assembly references and assembly search paths are retained.
 - C#: `.csproj` with logged source files, resolved assembly references/aliases,
   defines, language version, platform and unsafe setting. .NET Framework version
-  is inferred from reference assembly paths, or supplied with `--framework v4.8`.
+  is inferred from reference assembly paths and the target-framework attribute
+  in logged `AssemblyInfo.cs` inputs, or supplied with `--framework v4.8`.
+  Semicolon-separated compiler references and the `-t:` target shorthand are supported.
   Input can be an existing `.csproj` or direct C# compilation from a `.mke`
   using `ASSEMBLY_SOURCE_LIST` and `mkcsharp.mki`; an input `.csproj` is not required.
   This initial version supports .NET Framework, not SDK-style .NET projects.
