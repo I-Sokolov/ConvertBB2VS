@@ -1,12 +1,63 @@
 import contextlib
 import io
+import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
 import project_maker as pm
+
+
+@unittest.skipUnless(os.name == "nt", "Windows batch launcher requires cmd.exe")
+class WindowsLauncherTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.launcher_dir = self.root / "converter with spaces"
+        self.launcher_dir.mkdir()
+        self.launcher = self.launcher_dir / "conver.bat"
+        shutil.copyfile(Path(__file__).parent / "conver.bat", self.launcher)
+        (self.launcher_dir / "project_maker.py").write_text(
+            "import json, os, sys\n"
+            "print(json.dumps({'args': sys.argv[1:], 'cwd': os.getcwd()}))\n"
+            "sys.exit(17)\n", encoding="utf-8",
+        )
+        self.cwd = self.root / "repository with spaces"
+        self.cwd.mkdir()
+
+    def run_launcher(self, arguments):
+        env = os.environ.copy()
+        env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
+        comspec = env.get("ComSpec", "cmd.exe")
+        return subprocess.run(
+            f'"{comspec}" /d /c call "{self.launcher}" {arguments}',
+            cwd=self.cwd, env=env, capture_output=True, text=True,
+        )
+
+    def test_forwards_part_preserves_repository_cwd_and_exit_code(self):
+        result = self.run_launcher('"tfdvchecker"')
+        self.assertEqual(result.returncode, 17, result.stderr)
+        self.assertEqual(json.loads(result.stdout),
+                         {"args": ["tfdvchecker"], "cwd": str(self.cwd)})
+
+    def test_missing_part_prints_usage_without_starting_converter(self):
+        result = self.run_launcher("")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Usage: conver.bat partName", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_extra_parameter_is_rejected_without_starting_converter(self):
+        result = self.run_launcher("tfdvchecker extra")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Usage: conver.bat partName", result.stderr)
+        self.assertEqual(result.stdout, "")
 
 
 class ProjectMakerTests(unittest.TestCase):

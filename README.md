@@ -11,8 +11,13 @@ The shared solution defaults to `Bentley2VS\BentleyVS.sln`, one directory above
 From the OpenBuildings repository:
 
 ```powershell
-python ..\Bentley2VS\ConvertBB2VS\project_maker.py tfelement
+..\Bentley2VS\ConvertBB2VS\conver.bat tfelement
 ```
+
+`conver.bat` accepts exactly one argument, `partName`, and requires Python on
+`PATH`. It locates the converter beside the batch file, preserves the current
+directory as the source repository root, and returns the converter's exit code.
+Missing or extra arguments print usage and return exit code 2.
 
 From another directory, supply `--repo-root`:
 
