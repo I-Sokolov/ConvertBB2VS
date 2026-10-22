@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+.vs/
+projects/
+.vs-output/
+*.sln
+*.slnx
+*.vcxproj*
+*.csproj*
+*.build.cmd
+*.log
