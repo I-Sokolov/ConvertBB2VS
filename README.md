@@ -2,28 +2,40 @@
 
 Python 3.10+ console utility, standard library only. It reads existing Bentley
 build logs; it never builds, pulls packages, or modifies source makefiles.
-The shared solution defaults to `Bentley2VS\BentleyVS.sln`, one directory above
-`ConvertBB2VS`. Projects and build wrappers are stored in `Bentley2VS\projects`.
-`--output` changes the root containing the shared solution and `projects`.
+The tool is located at `W:\DevArea\Bentley\VS\ConvertBB2VS`.
+The shared solution defaults to `W:\DevArea\Bentley\VS\MyBentley.sln`, and
+generated projects and build wrappers are stored in
+`W:\DevArea\Bentley\VS\projects`. `--output` changes that output root.
 
 ## Usage
 
-From the OpenBuildings repository:
+From PowerShell in the OpenBuildings repository:
 
 ```powershell
-..\Bentley2VS\ConvertBB2VS\conver.bat tfelement
+..\..\VS\ConvertBB2VS\convert.ps1 . tfelement
 ```
 
-`conver.bat` accepts exactly one argument, `partName`, and requires Python on
-`PATH`. It locates the converter beside the batch file, preserves the current
-directory as the source repository root, and returns the converter's exit code.
-Missing or extra arguments print usage and return exit code 2.
+`convert.ps1` and `convert.bat` accept exactly two arguments: a project folder
+specified as an absolute path or relative to the current working directory,
+then a Part name. They require Python on
+`PATH`, locate the converter beside the launcher, and return its exit code.
+Missing or extra arguments print usage and return exit code 2. If PowerShell's
+execution policy prevents running the script, invoke it with
+`powershell -ExecutionPolicy Bypass -File .\convert.ps1 ...` as permitted by
+your local policy. The converter uses the specified project folder as the BB
+repository root; BB repository name and build-strategy argument default to
+that folder's name.
 
-From another directory, supply `--repo-root`:
+For diagnostics or custom configurations, invoke Python directly:
 
 ```powershell
-python .\project_maker.py tfelement --repo-root ..\..\OpenBuildings
+python .\project_maker.py W:\DevArea\Bentley\OBD.26.Escalations\OpenBuildings tfelement
 ```
+
+For example, from `W:\DevArea\Bentley`, use
+`.\VS\ConvertBB2VS\convert.ps1 .\OBD.26.Escalations\OpenBuildings tfelement`.
+The project folder may be outside the Bentley directory. Changing the current
+working directory does not change the default solution or project output folder.
 
 The utility searches recursively for `<Part>_build.log` under
 `%OutRoot%\Winx64\LogFiles`, case-insensitively. It asks which file to use if
@@ -32,11 +44,11 @@ Use `--log <path>` or `--part-file <path>` to disambiguate explicitly.
 Junctions are followed with physical-directory cycle detection.
 
 Root configuration precedence: explicit `--out-root`/`--src-root`, environment,
-literal assignments in the repository's `bb\env.bat`. Only OutRoot has a
-fallback: `<repo-root>\bb\out`. Batch environment files are read, not executed
-during generation. SrcRoot must be configured; its value is never guessed.
+literal assignments in the selected project's `bb\env.bat`. Only OutRoot has a
+fallback: `<projectFolder>\bb\out`. Batch environment files are read, not
+executed during generation. SrcRoot must be configured; its value is never guessed.
 
-Open `BentleyVS.sln` in Visual Studio 2022 with C++ desktop
+Open `MyBentley.sln` in Visual Studio 2022 with C++ desktop
 development tools and/or the matching .NET Framework targeting pack installed.
 Use `--debug-exe <host.exe>` to configure launching a host application; otherwise
 attach the debugger to an existing process. No host executable is guessed.
@@ -50,7 +62,7 @@ build, including Parts with multiple generated projects.
 
 Unmodified per-Part solutions created by the previous version are recognized
 automatically. Their project files, filters, debugger settings and build wrappers
-are moved into `projects` and registered in `BentleyVS.sln`; those old per-Part
+are moved into `projects` and registered in `MyBentley.sln`; those old per-Part
 solutions are then removed. Unrecognized or manually edited solutions are not
 migrated. A conflicting destination stops generation without overwriting it.
 
@@ -69,16 +81,16 @@ migrated. A conflicting destination stops generation without overwriting it.
   Input can be an existing `.csproj` or direct C# compilation from a `.mke`
   using `ASSEMBLY_SOURCE_LIST` and `mkcsharp.mki`; an input `.csproj` is not required.
   This initial version supports .NET Framework, not SDK-style .NET projects.
-- One common `BentleyVS.sln` and a per-Part `.build.cmd`. If a Part contains native and managed
+- One common `MyBentley.sln` and a per-Part `.build.cmd`. If a Part contains native and managed
   compiler commands, both project types appear in the solution.
 
 The single `FromLog|x64` configuration represents captured settings. It does
 not fabricate Debug/Release configurations. C# retains its logged compiler
 platform (including AnyCPU) inside that solution configuration.
 Build, Rebuild and Clean invoke the real BentleyBuild Python entry point
-through its existing virtual environment, after `env.bat OpenBuildings`.
+through its existing virtual environment, after `env.bat <strategy>`.
 Override that environment argument using `--strategy`.
-`--repository` defaults to OpenBuildings.
+`--repository` and `--strategy` default to the selected project folder's name.
 BB receives the selected Part, its full PartFile path, configured roots, and
 `--noSubParts`: dependencies are not rebuilt. The solution schedules the Part
 only once even when it contains multiple generated projects.
@@ -125,6 +137,6 @@ Aggregate Parts without `BMakeFile` are not yet supported.
 ## Tests (no Bentley compilation)
 
 ```powershell
-Set-Location .\ConvertBB2VS
+Set-Location W:\DevArea\Bentley\VS\ConvertBB2VS
 python -B -m unittest -v
 ```

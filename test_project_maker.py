@@ -22,8 +22,8 @@ class WindowsLauncherTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.launcher_dir = self.root / "converter with spaces"
         self.launcher_dir.mkdir()
-        self.launcher = self.launcher_dir / "conver.bat"
-        shutil.copyfile(Path(__file__).parent / "conver.bat", self.launcher)
+        self.launcher = self.launcher_dir / "convert.bat"
+        shutil.copyfile(Path(__file__).parent / "convert.bat", self.launcher)
         (self.launcher_dir / "project_maker.py").write_text(
             "import json, os, sys\n"
             "print(json.dumps({'args': sys.argv[1:], 'cwd': os.getcwd()}))\n"
@@ -42,21 +42,77 @@ class WindowsLauncherTests(unittest.TestCase):
         )
 
     def test_forwards_part_preserves_repository_cwd_and_exit_code(self):
-        result = self.run_launcher('"tfdvchecker"')
+        result = self.run_launcher('"OBD Projects\\Open Buildings" "tfdvchecker"')
         self.assertEqual(result.returncode, 17, result.stderr)
         self.assertEqual(json.loads(result.stdout),
-                         {"args": ["tfdvchecker"], "cwd": str(self.cwd)})
+                         {"args": ["OBD Projects\\Open Buildings", "tfdvchecker"],
+                          "cwd": str(self.cwd)})
 
-    def test_missing_part_prints_usage_without_starting_converter(self):
+    def test_missing_arguments_print_usage_without_starting_converter(self):
         result = self.run_launcher("")
         self.assertEqual(result.returncode, 2)
-        self.assertIn("Usage: conver.bat partName", result.stderr)
+        self.assertIn("Usage: convert.bat projectFolder partName", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_missing_part_prints_usage_without_starting_converter(self):
+        result = self.run_launcher('"OBD.26.Escalations\\OpenBuildings"')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Usage: convert.bat projectFolder partName", result.stderr)
         self.assertEqual(result.stdout, "")
 
     def test_extra_parameter_is_rejected_without_starting_converter(self):
-        result = self.run_launcher("tfdvchecker extra")
+        result = self.run_launcher('"OBD.26.Escalations\\OpenBuildings" tfdvchecker extra')
         self.assertEqual(result.returncode, 2)
-        self.assertIn("Usage: conver.bat partName", result.stderr)
+        self.assertIn("Usage: convert.bat projectFolder partName", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+
+@unittest.skipUnless(os.name == "nt" and (shutil.which("powershell") or shutil.which("pwsh")),
+                     "PowerShell launcher requires Windows PowerShell")
+class PowerShellLauncherTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.launcher_dir = self.root / "converter with spaces"
+        self.launcher_dir.mkdir()
+        self.launcher = self.launcher_dir / "convert.ps1"
+        shutil.copyfile(Path(__file__).parent / "convert.ps1", self.launcher)
+        (self.launcher_dir / "project_maker.py").write_text(
+            "import json, os, sys\n"
+            "print(json.dumps({'args': sys.argv[1:], 'cwd': os.getcwd()}))\n"
+            "sys.exit(17)\n", encoding="utf-8",
+        )
+        self.cwd = self.root / "repository with spaces"
+        self.cwd.mkdir()
+        self.powershell = shutil.which("powershell") or shutil.which("pwsh")
+
+    def run_launcher(self, *arguments):
+        env = os.environ.copy()
+        env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
+        return subprocess.run(
+            [self.powershell, "-NoProfile", "-ExecutionPolicy", "Bypass",
+             "-File", str(self.launcher), *arguments],
+            cwd=self.cwd, env=env, capture_output=True, text=True,
+        )
+
+    def test_forwards_arguments_preserves_cwd_and_exit_code(self):
+        result = self.run_launcher("OBD Projects\\Open Buildings", "tfdvchecker")
+        self.assertEqual(result.returncode, 17, result.stderr)
+        self.assertEqual(json.loads(result.stdout),
+                         {"args": ["OBD Projects\\Open Buildings", "tfdvchecker"],
+                          "cwd": str(self.cwd)})
+
+    def test_missing_arguments_print_usage_without_starting_converter(self):
+        result = self.run_launcher()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Usage: .\\convert.ps1 projectFolder partName", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_extra_argument_is_rejected_without_starting_converter(self):
+        result = self.run_launcher("OBD.26.Escalations\\OpenBuildings", "tfdvchecker", "extra")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Usage: .\\convert.ps1 projectFolder partName", result.stderr)
         self.assertEqual(result.stdout, "")
 
 
@@ -199,7 +255,8 @@ class ProjectMakerTests(unittest.TestCase):
         self.assertEqual(text.count(".ActiveCfg"), 2)
 
     def test_end_to_end_generation_no_build_and_no_implicit_overwrite(self):
-        repo = self.root / "repo"
+        bentley_root = self.root
+        repo = bentley_root / "repo"
         src = repo / "bb" / "src"
         self.write("repo/env.bat", "@echo off\n")
         self.write("repo/bb/src/BentleyBuild/.venv/Scripts/python.exe")
@@ -219,17 +276,19 @@ class ProjectMakerTests(unittest.TestCase):
                    pm.solution([("legacy", "legacy.csproj", pm.CS_GUID)]))
         self.write("generated/legacy.csproj", "<Project/>")
         self.write("generated/legacy.build.cmd", "@echo off\n")
-        args = pm.parser().parse_args(["tfelement", "--repo-root", str(repo),
-            "--src-root", str(src), "--output", str(output), "--non-interactive"])
-        with contextlib.redirect_stdout(io.StringIO()):
+        args = pm.parser().parse_args([str(repo), "tfelement",
+            "--src-root", str(src), "--non-interactive"])
+        with patch("project_maker.workspace_roots", return_value=(bentley_root, output)), \
+                contextlib.redirect_stdout(io.StringIO()):
             paths = pm.generate(args)
         self.assertEqual(len(paths), 4)
-        self.assertTrue((output / "BentleyVS.sln").is_file())
+        self.assertTrue((output / "MyBentley.sln").is_file())
+        args.output = output
         self.assertFalse((output / "tfelement.sln").exists())
         self.assertFalse((output / "legacy.sln").exists())
         self.assertFalse((output / "legacy.csproj").exists())
         self.assertTrue((output / "projects" / "legacy.csproj").is_file())
-        solution_text = pm.read_text(output / "BentleyVS.sln")
+        solution_text = pm.read_text(output / "MyBentley.sln")
         self.assertIn(r"projects\legacy.csproj", solution_text)
         self.assertIn(r"projects\tfelement.vcxproj", solution_text)
         for path in paths:
@@ -237,6 +296,7 @@ class ProjectMakerTests(unittest.TestCase):
                 ET.parse(path)
         wrapper = pm.read_text(output / "projects" / "tfelement.build.cmd")
         self.assertIn('"--partName" "tfelement"', wrapper)
+        self.assertIn('call "' + str(repo / "env.bat") + '" "repo"', wrapper)
         self.assertIn('"--noSubParts"', wrapper)
         self.assertIn('"--outputroot"', wrapper)
         self.assertIn('if errorlevel 1 exit /b %errorlevel%', wrapper)
@@ -251,18 +311,18 @@ class ProjectMakerTests(unittest.TestCase):
         managed_source = self.write("repo/Managed/app.cs")
         self.write("repo/bb/out/Winx64/LogFiles/Managed/managed_build.log",
             f'csc.exe /reference:"C:\\Ref\\.NETFramework\\v4.8\\System.dll" "{managed_source}"\n')
-        managed_args = pm.parser().parse_args(["managed", "--repo-root", str(repo),
+        managed_args = pm.parser().parse_args([str(repo), "managed",
             "--src-root", str(src), "--output", str(output), "--non-interactive"])
         with contextlib.redirect_stdout(io.StringIO()):
             pm.generate(managed_args)
-        shared = pm.read_text(output / "BentleyVS.sln")
+        shared = pm.read_text(output / "MyBentley.sln")
         self.assertIn(r"projects\legacy.csproj", shared)
         self.assertIn(r"projects\tfelement.vcxproj", shared)
         self.assertIn(r"projects\managed.csproj", shared)
         managed_args.force = True
         with contextlib.redirect_stdout(io.StringIO()):
             pm.generate(managed_args)
-        self.assertEqual(pm.read_text(output / "BentleyVS.sln"), shared)
+        self.assertEqual(pm.read_text(output / "MyBentley.sln"), shared)
         args.force = True
         makefile.write_text(makefile.read_text() + "$(o)missing$(oext): $(baseDir)missing.cpp\n")
         before = {path: path.read_bytes() for path in paths}
@@ -401,6 +461,35 @@ class ProjectMakerTests(unittest.TestCase):
         text = pm.merge_solution(None, [("native", r"projects\native.vcxproj", pm.CPP_GUID)])
         with self.assertRaisesRegex(pm.GenerationError, "Conflicting"):
             pm.merge_solution(text, [("native", r"elsewhere\native.vcxproj", pm.CPP_GUID)])
+
+    def test_workspace_roots_match_requested_directory_layout(self):
+        bentley_root, solution_root = pm.workspace_roots()
+        self.assertEqual(bentley_root, Path(__file__).resolve().parent.parent.parent)
+        self.assertEqual(solution_root, Path(__file__).resolve().parent.parent)
+        self.assertIsNone(pm.parser().parse_args(["OBD.26.Escalations\\OpenBuildings", "tfelement"]).output)
+
+    def test_project_folder_is_absolute_or_relative_to_cwd(self):
+        repo = self.root / "project with spaces"
+        repo.mkdir()
+        cwd = self.root / "working folder"
+        cwd.mkdir()
+        cases = ((cwd, str(repo)), (cwd, str(Path("..") / repo.name)), (repo, "."))
+        for working_directory, folder in cases:
+            with self.subTest(folder=folder):
+                args = pm.parser().parse_args([folder, "tfelement"])
+                with patch("os.getcwd", return_value=str(working_directory)), \
+                        patch("project_maker.static_environment",
+                              side_effect=pm.GenerationError("resolved project")) as environment:
+                    with self.assertRaisesRegex(pm.GenerationError, "resolved project"):
+                        pm.generate(args)
+                environment.assert_called_once_with(repo.resolve())
+
+    def test_missing_project_folder_reports_resolved_path(self):
+        missing = self.root / "missing"
+        args = pm.parser().parse_args([str(missing), "tfelement"])
+        with self.assertRaises(pm.GenerationError) as error:
+            pm.generate(args)
+        self.assertIn(f"Repository directory does not exist: {missing}", str(error.exception))
 
     def test_legacy_solution_recognizes_generated_files_only(self):
         records = [("old", "old.csproj", pm.CS_GUID)]

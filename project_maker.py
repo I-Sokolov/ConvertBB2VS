@@ -784,7 +784,7 @@ SOLUTION_PROJECT = re.compile(
 def merge_solution(existing: str | None, projects: list[tuple[str, str, str]]) -> str:
     text = existing.replace("\r\n", "\n") if existing is not None else solution([])
     if not text.startswith("Microsoft Visual Studio Solution File, Format Version 12.00"):
-        raise GenerationError("Unsupported BentleyVS.sln format; the solution was not changed.")
+        raise GenerationError("Unsupported MyBentley.sln format; the solution was not changed.")
     blocks = list(SOLUTION_PROJECT.finditer(text))
     additions: list[str] = []
     mappings: list[str] = []
@@ -799,14 +799,14 @@ def merge_solution(existing: str | None, projects: list[tuple[str, str, str]]) -
                 matching[0]["guid"].casefold(), matching[0]["path"].casefold(),
                 matching[0]["name"].casefold(), matching[0]["kind"].casefold()
             ) != (project_guid.casefold(), filename.casefold(), name.casefold(), kind.casefold()):
-                raise GenerationError(f"Conflicting project in BentleyVS.sln: {name}")
+                raise GenerationError(f"Conflicting project in MyBentley.sln: {name}")
             continue
         additions.append(f'Project("{kind}") = "{name}", "{filename}", "{project_guid}"\nEndProject\n')
         mappings.append(f"\t\t{project_guid}.FromLog|x64.ActiveCfg = FromLog|x64")
         if index == 0:
             mappings.append(f"\t\t{project_guid}.FromLog|x64.Build.0 = FromLog|x64")
     if text.count("\nGlobal\n") != 1:
-        raise GenerationError("Cannot locate the Global section of BentleyVS.sln.")
+        raise GenerationError("Cannot locate the Global section of MyBentley.sln.")
     text = text.replace("\nGlobal\n", "\n" + "".join(additions) + "Global\n", 1)
     for section, phase, new_lines in (
         ("SolutionConfigurationPlatforms", "preSolution", ["\t\tFromLog|x64 = FromLog|x64"]),
@@ -821,7 +821,7 @@ def merge_solution(existing: str | None, projects: list[tuple[str, str, str]]) -
             ) + match[3] + text[match.end():]
         else:
             if not re.search(r"(?m)^EndGlobal$", text):
-                raise GenerationError("Cannot locate EndGlobal in BentleyVS.sln.")
+                raise GenerationError("Cannot locate EndGlobal in MyBentley.sln.")
             content = f"\tGlobalSection({section}) = {phase}\n" + "".join(
                 line + "\n" for line in new_lines
             ) + "\tEndGlobalSection\n"
@@ -833,7 +833,7 @@ def legacy_projects(output: Path) -> list[tuple[Path, list[tuple[str, str, str]]
     """Recognize only unmodified per-Part solutions produced by the old generator."""
     result = []
     for path in sorted(output.glob("*.sln")):
-        if path.name.casefold() == "bentleyvs.sln":
+        if path.name.casefold() == "mybentley.sln":
             continue
         text = read_text(path).replace("\r\n", "\n")
         blocks = list(SOLUTION_PROJECT.finditer(text))
@@ -874,6 +874,11 @@ def batch_arg(value: str) -> str:
     return '"' + value.replace("%", "%%") + '"'
 
 
+def workspace_roots() -> tuple[Path, Path]:
+    app_dir = Path(__file__).resolve().parent
+    return app_dir.parent.parent, app_dir.parent
+
+
 def build_wrapper(repo: Path, src_root: Path, out_root: Path, part_file: Path, part: str,
                   strategy: str, repository: str) -> str:
     python = src_root / "BentleyBuild" / ".venv" / "Scripts" / "python.exe"
@@ -898,15 +903,15 @@ def build_wrapper(repo: Path, src_root: Path, out_root: Path, part_file: Path, p
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
+    result.add_argument("project_folder", help="Absolute project folder or path relative to the current working directory")
     result.add_argument("part", help="Part name, for example tfelement")
-    result.add_argument("--repo-root", type=Path, default=Path.cwd())
-    result.add_argument("--repository", default="OpenBuildings", help="BB repository name")
+    result.add_argument("--repository", help="Override the BB repository name (defaults to project folder name)")
     result.add_argument("--part-file", type=Path, help="Explicit PartFile.xml when ambiguous")
-    result.add_argument("--out-root", type=Path, help="Default: OutRoot, bb/env.bat, then repo-root/bb/out")
+    result.add_argument("--out-root", type=Path, help="Default: OutRoot, bb/env.bat, then projectFolder/bb/out")
     result.add_argument("--src-root", type=Path, help="Default: SrcRoot or a literal definition in bb/env.bat")
     result.add_argument("--log", type=Path, help="Explicit log file instead of recursive lookup")
-    result.add_argument("--output", type=Path, default=Path(__file__).resolve().parent.parent)
-    result.add_argument("--strategy", default="OpenBuildings", help="Argument passed to repository env.bat")
+    result.add_argument("--output", type=Path, help="Output directory (default: parent of ConvertBB2VS)")
+    result.add_argument("--strategy", help="Argument passed to repository env.bat (defaults to repository name)")
     result.add_argument("--framework", help="Explicit C# .NET Framework version, e.g. v4.8")
     result.add_argument("--debug-exe", type=Path, help="Host program launched by the VS debugger")
     result.add_argument("--non-interactive", action="store_true", help="Fail on ambiguous matches")
@@ -917,9 +922,12 @@ def parser() -> argparse.ArgumentParser:
 def generate(args: argparse.Namespace) -> list[Path]:
     if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", args.part) or args.part.endswith("."):
         raise GenerationError("Part name must contain only letters, digits, underscores, dots or hyphens.")
-    repo = args.repo_root.resolve()
+    _, default_output = workspace_roots()
+    repo = Path(args.project_folder).resolve()
     if not repo.is_dir():
         raise GenerationError(f"Repository directory does not exist: {repo}")
+    repository = args.repository or repo.name
+    strategy = args.strategy or repository
     config = static_environment(repo)
     out_root = (args.out_root or Path(os.environ.get("OutRoot") or config.get("outroot") or repo / "bb" / "out")).resolve()
     src_value = args.src_root or os.environ.get("SrcRoot") or config.get("srcroot")
@@ -950,7 +958,7 @@ def generate(args: argparse.Namespace) -> list[Path]:
     name = definition.attrib["Name"]
     files: dict[str, str] = {
         name + ".build.cmd": build_wrapper(repo, src_root, out_root, part_file, name,
-                                          args.strategy, args.repository)
+                                          strategy, repository)
     }
     command = 'call "$(ProjectDir)' + name + '.build.cmd"'
     projects: list[tuple[str, str, str]] = []
@@ -967,13 +975,13 @@ def generate(args: argparse.Namespace) -> list[Path]:
         cs_name = name if not native and len(managed) == 1 else f"{name}.Managed{index + 1}"
         files.update(cs_project(cs_name, unit, unit.cwd, command, args.framework, args.debug_exe))
         projects.append((cs_name, cs_name + ".csproj", CS_GUID))
-    output = args.output.resolve()
+    output = (args.output or default_output).resolve()
     project_dir = output / "projects"
     paths = [project_dir / filename for filename in files]
     existing = [p for p in paths if p.exists()]
     if existing and not args.force:
         raise GenerationError("Output files already exist (use --force to replace):\n" + "\n".join(map(str, existing)))
-    solution_path = output / "BentleyVS.sln"
+    solution_path = output / "MyBentley.sln"
     solution_text = read_text(solution_path) if solution_path.exists() else None
     migrations = legacy_projects(output)
     for _, records, old_files in migrations:
