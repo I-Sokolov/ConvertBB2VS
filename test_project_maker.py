@@ -291,6 +291,12 @@ class ProjectMakerTests(unittest.TestCase):
         solution_text = pm.read_text(output / "MyBentley.sln")
         self.assertIn(r"projects\legacy.csproj", solution_text)
         self.assertIn(r"projects\tfelement.vcxproj", solution_text)
+        folder_blocks = [block for block in pm.SOLUTION_PROJECT.finditer(solution_text.replace("\r\n", "\n"))
+                         if block["kind"] == pm.SOLUTION_FOLDER_GUID]
+        self.assertEqual([block["name"] for block in folder_blocks], [repo.parent.name, repo.name])
+        self.assertIn(f'{folder_blocks[1]["guid"]} = {folder_blocks[0]["guid"]}', solution_text)
+        self.assertIn(f'{pm.guid("tfelement")} = {folder_blocks[1]["guid"]}', solution_text)
+        self.assertNotIn(f'{pm.guid("legacy")} = ', solution_text)
         for path in paths:
             if path.suffix in (".vcxproj", ".filters"):
                 ET.parse(path)
@@ -448,6 +454,73 @@ class ProjectMakerTests(unittest.TestCase):
         source = self.write("managed/first.cs")
         unit = pm.Compilation("cs", self.root, sources=[source])
         self.assertEqual(self.manifest(makefile).verify([unit]), 1)
+
+    def test_solution_folders_reused_for_native_and_managed_projects(self):
+        folders = ("OBD.26.Escalations", "OpenBuildings")
+        first = [("part", r"projects\part.vcxproj", pm.CPP_GUID),
+                 ("part.Managed1", r"projects\part.Managed1.csproj", pm.CS_GUID)]
+        text = pm.merge_solution(None, first, folders)
+        second = [("other", r"projects\other.csproj", pm.CS_GUID)]
+        text = pm.merge_solution(text, second, tuple(name.lower() for name in folders))
+        blocks = list(pm.SOLUTION_PROJECT.finditer(text))
+        folder_blocks = [block for block in blocks if block["kind"] == pm.SOLUTION_FOLDER_GUID]
+        self.assertEqual([block["name"] for block in folder_blocks], list(folders))
+        parent, child = [block["guid"] for block in folder_blocks]
+        self.assertIn(f"{child} = {parent}", text)
+        for name, _, _ in first + second:
+            self.assertIn(f"{pm.guid(name)} = {child}", text)
+        self.assertEqual(text.count("GlobalSection(NestedProjects)"), 1)
+        self.assertEqual(text.count(".Build.0"), 2)
+        self.assertEqual(text.count(".ActiveCfg"), 3)
+        self.assertEqual(pm.merge_solution(text, first, folders), text)
+
+    def test_solution_folders_distinguish_same_name_under_different_parents(self):
+        first = [("first", r"projects\first.csproj", pm.CS_GUID)]
+        second = [("second", r"projects\second.csproj", pm.CS_GUID)]
+        text = pm.merge_solution(None, first, ("OBD.26.Escalations", "OpenBuildings"))
+        text = pm.merge_solution(text, second, ("OBD.27", "OpenBuildings"))
+        folders = [block for block in pm.SOLUTION_PROJECT.finditer(text)
+                   if block["kind"] == pm.SOLUTION_FOLDER_GUID]
+        self.assertEqual(len(folders), 4)
+        self.assertEqual(len({block["guid"] for block in folders}), 4)
+        for project, (parent, child) in zip((first, second), (folders[:2], folders[2:])):
+            self.assertIn(f'{child["guid"]} = {parent["guid"]}', text)
+            self.assertIn(f'{pm.guid(project[0][0])} = {child["guid"]}', text)
+
+    def test_solution_folders_reuse_manual_folders_and_preserve_other_nesting(self):
+        parent, child = pm.guid("manual parent"), pm.guid("manual child")
+        existing = pm.solution([("old", r"projects\old.csproj", pm.CS_GUID)])
+        existing = existing.replace("\nGlobal\n", (
+            f'\nProject("{pm.SOLUTION_FOLDER_GUID}") = "Release", "Release", "{parent}"\n'
+            'EndProject\n'
+            f'Project("{pm.SOLUTION_FOLDER_GUID}") = "Repo", "Repo", "{child}"\n'
+            '\tProjectSection(SolutionItems) = preProject\n'
+            '\t\treadme.txt = readme.txt\n\tEndProjectSection\nEndProject\nGlobal\n'))
+        existing = existing.replace("EndGlobal\n", (
+            '\tGlobalSection(NestedProjects) = preSolution\n'
+            f'\t\t{child} = {parent}\n\t\t{pm.guid("old")} = {parent}\n'
+            '\tEndGlobalSection\nEndGlobal\n'))
+        projects = [("Repo", r"projects\Repo.csproj", pm.CS_GUID)]
+        text = pm.merge_solution(existing, projects, ("Release", "Repo"))
+        self.assertEqual(text.count(f'Project("{pm.SOLUTION_FOLDER_GUID}")'), 2)
+        self.assertIn("readme.txt = readme.txt", text)
+        self.assertIn(f'{pm.guid("old")} = {parent}', text)
+        self.assertIn(f'{pm.guid("Repo")} = {child}', text)
+        self.assertEqual(pm.merge_solution(text, projects, ("Release", "Repo")), text)
+
+    def test_solution_folders_do_not_move_existing_projects(self):
+        projects = [("old", r"projects\old.csproj", pm.CS_GUID)]
+        text = pm.merge_solution(None, projects)
+        self.assertEqual(pm.merge_solution(text, projects, ("Release", "Repo")), text)
+
+    def test_solution_folders_reject_ambiguous_existing_folders(self):
+        text = pm.solution([])
+        for value in ("first folder", "second folder"):
+            text = text.replace("\nGlobal\n", (
+                f'\nProject("{pm.SOLUTION_FOLDER_GUID}") = "Repo", "Repo", "{pm.guid(value)}"\n'
+                'EndProject\nGlobal\n'))
+        with self.assertRaisesRegex(pm.GenerationError, "Ambiguous solution folder"):
+            pm.merge_solution(text, [("part", r"projects\part.csproj", pm.CS_GUID)], ("Repo",))
 
     def test_shared_solution_builds_each_mixed_part_only_once(self):
         text = pm.merge_solution(None, [

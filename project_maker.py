@@ -18,6 +18,7 @@ NS = "http://schemas.microsoft.com/developer/msbuild/2003"
 ET.register_namespace("", NS)
 CPP_GUID = "{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}"
 CS_GUID = "{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}"
+SOLUTION_FOLDER_GUID = "{2150E333-8FDC-42A3-9474-1A3956D46DE8}"
 COMPILER = re.compile(r'(?:^|[\\/\s"])(clang-cl|cl|csc)(?:\.exe)?(?:"?\s+)', re.I)
 PROJECT_START = re.compile(r'\bProject "([^"]+\.(?:csproj|vcxproj))".* on node ', re.I)
 PROJECT_END = re.compile(r'\bDone Building Project "([^"]+\.(?:csproj|vcxproj))"', re.I)
@@ -781,19 +782,22 @@ SOLUTION_PROJECT = re.compile(
 )
 
 
-def merge_solution(existing: str | None, projects: list[tuple[str, str, str]]) -> str:
+def merge_solution(existing: str | None, projects: list[tuple[str, str, str]],
+                   folders: tuple[str, ...] = ()) -> str:
     text = existing.replace("\r\n", "\n") if existing is not None else solution([])
     if not text.startswith("Microsoft Visual Studio Solution File, Format Version 12.00"):
         raise GenerationError("Unsupported MyBentley.sln format; the solution was not changed.")
     blocks = list(SOLUTION_PROJECT.finditer(text))
     additions: list[str] = []
     mappings: list[str] = []
+    new_projects: list[str] = []
     for index, (name, filename, kind) in enumerate(projects):
         project_guid = guid(name)
         matching = [block for block in blocks if
                     block["guid"].casefold() == project_guid.casefold()
-                    or block["path"].casefold() == filename.casefold()
-                    or block["name"].casefold() == name.casefold()]
+                    or (block["kind"].casefold() != SOLUTION_FOLDER_GUID.casefold() and (
+                        block["path"].casefold() == filename.casefold()
+                        or block["name"].casefold() == name.casefold()))]
         if matching:
             if len(matching) != 1 or (
                 matching[0]["guid"].casefold(), matching[0]["path"].casefold(),
@@ -802,15 +806,49 @@ def merge_solution(existing: str | None, projects: list[tuple[str, str, str]]) -
                 raise GenerationError(f"Conflicting project in MyBentley.sln: {name}")
             continue
         additions.append(f'Project("{kind}") = "{name}", "{filename}", "{project_guid}"\nEndProject\n')
+        new_projects.append(project_guid)
         mappings.append(f"\t\t{project_guid}.FromLog|x64.ActiveCfg = FromLog|x64")
         if index == 0:
             mappings.append(f"\t\t{project_guid}.FromLog|x64.Build.0 = FromLog|x64")
+    nesting: list[str] = []
+    if folders and new_projects:
+        parents: dict[str, str] = {}
+        nested = re.search(r"\tGlobalSection\(NestedProjects\) = \w+\n(.*?)\tEndGlobalSection",
+                           text, re.S)
+        if nested:
+            for child, parent in re.findall(r"(?m)^\s*(\{[^}]+\})\s*=\s*(\{[^}]+\})\s*$", nested[1]):
+                key = child.casefold()
+                if key in parents and parents[key] != parent.casefold():
+                    raise GenerationError("Conflicting NestedProjects entries in MyBentley.sln.")
+                parents[key] = parent.casefold()
+        parent_guid = ""
+        for folder in folders:
+            matching_folders = [block for block in blocks
+                                if block["kind"].casefold() == SOLUTION_FOLDER_GUID.casefold()
+                                and block["name"].casefold() == folder.casefold()
+                                and parents.get(block["guid"].casefold(), "") == parent_guid.casefold()]
+            if len(matching_folders) > 1:
+                raise GenerationError(f"Ambiguous solution folder in MyBentley.sln: {folder}")
+            if matching_folders:
+                folder_guid = matching_folders[0]["guid"]
+            else:
+                folder_guid = guid("solution-folder:" + parent_guid.casefold() + ":" + folder.casefold())
+                if any(block["guid"].casefold() == folder_guid.casefold() for block in blocks) \
+                        or folder_guid in new_projects:
+                    raise GenerationError(f"Conflicting solution folder in MyBentley.sln: {folder}")
+                additions.append(
+                    f'Project("{SOLUTION_FOLDER_GUID}") = "{folder}", "{folder}", "{folder_guid}"\nEndProject\n')
+                if parent_guid:
+                    nesting.append(f"\t\t{folder_guid} = {parent_guid}")
+            parent_guid = folder_guid
+        nesting.extend(f"\t\t{project_guid} = {parent_guid}" for project_guid in new_projects)
     if text.count("\nGlobal\n") != 1:
         raise GenerationError("Cannot locate the Global section of MyBentley.sln.")
     text = text.replace("\nGlobal\n", "\n" + "".join(additions) + "Global\n", 1)
     for section, phase, new_lines in (
         ("SolutionConfigurationPlatforms", "preSolution", ["\t\tFromLog|x64 = FromLog|x64"]),
         ("ProjectConfigurationPlatforms", "postSolution", mappings),
+        *([("NestedProjects", "preSolution", nesting)] if nesting else []),
     ):
         pattern = re.compile(r"(\tGlobalSection\(" + section + r"\) = \w+\n)(.*?)(\tEndGlobalSection)", re.S)
         match = pattern.search(text)
@@ -993,7 +1031,7 @@ def generate(args: argparse.Namespace) -> list[Path]:
                 raise GenerationError(f"Cannot migrate {old}: destination already exists.")
     solution_text = merge_solution(solution_text, [
         (n, str(Path("projects") / f), k) for n, f, k in projects
-    ])
+    ], folders=tuple(name for name in (repo.parent.name, repo.name) if name))
     project_dir.mkdir(parents=True, exist_ok=True)
     for _, _, old_files in migrations:
         for old in old_files:

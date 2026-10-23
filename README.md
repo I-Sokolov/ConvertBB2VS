@@ -55,7 +55,13 @@ attach the debugger to an existing process. No host executable is guessed.
 
 Existing output files are protected; `--force` explicitly permits replacement.
 Do not use `--force` on files whose manual edits you want to preserve.
-The shared solution is updated automatically: new projects are appended,
+The shared solution is updated automatically: new projects are added under two
+nested solution folders named after the last two directories of the resolved
+`projectFolder` path. For example, `OBD.26.Escalations\OpenBuildings` produces
+`OBD.26.Escalations` > `OpenBuildings`. Existing folders at the corresponding
+level are reused. These are virtual solution folders; output paths do not change.
+Previously registered projects keep their existing placement.
+New project entries are appended,
 existing entries and other solution sections are retained, and regenerating a
 project does not duplicate its entry. Each Part is scheduled once for a solution
 build, including Parts with multiple generated projects.
