@@ -343,6 +343,69 @@ class ProjectMakerTests(unittest.TestCase):
         return pm.SourceManifest(makefile, self.root / "test.PartFile.xml",
                                  self.root / "bb" / "src", self.root / "bb" / "out")
 
+    def test_environment_paths_require_defined_nonempty_variables(self):
+        for environment in ({}, {"CONVERT_TEST_ROOT": ""}):
+            with self.subTest(environment=environment), patch.dict(os.environ, environment, clear=True):
+                with self.assertRaisesRegex(pm.GenerationError, "CONVERT_TEST_ROOT.*undefined or empty"):
+                    pm.environment_path(r"%CONVERT_TEST_ROOT%\src")
+                with self.assertRaisesRegex(pm.GenerationError, "CONVERT_TEST_ROOT.*undefined or empty"):
+                    pm.absolute(r"%CONVERT_TEST_ROOT%\first.cpp", self.root)
+        with patch.dict(os.environ, {"CONVERT_TEST_ROOT": str(self.root)}, clear=True):
+            self.assertEqual(pm.environment_path(r"%CONVERT_TEST_ROOT%\src"), self.root / "src")
+            self.assertEqual(pm.environment_path("$(Platform)"), Path("$(Platform)"))
+        with patch.dict(os.environ, {"FIRST": "%MISSING%"}, clear=True):
+            with self.assertRaisesRegex(pm.GenerationError, "MISSING.*undefined or empty"):
+                pm.environment_path("%FIRST%")
+        with patch.dict(os.environ, {"FIRST": "%FIRST%"}, clear=True):
+            with self.assertRaisesRegex(pm.GenerationError, "Recursive environment variable"):
+                pm.environment_path("%FIRST%")
+        with patch.dict(os.environ, {"CONVERT_TEST_ROOT": str(self.root) + "\\"}, clear=True):
+            self.assertEqual(pm.environment_path("%CONVERT_TEST_ROOT%src"), self.root / "src")
+
+    def test_root_fallbacks_are_preserved_and_directories_checked(self):
+        repo = self.root / "repo"
+        src = self.root / "source"
+        src.mkdir()
+        self.write("repo/bb/env.bat", f'set "SrcRoot={src}"\n')
+        args = pm.parser().parse_args([str(repo), "part", "--non-interactive"])
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(pm.GenerationError, "OutRoot directory does not exist"):
+                pm.generate(args)
+            out = repo / "bb" / "out"
+            out.mkdir()
+            with patch("project_maker.find_log", side_effect=pm.GenerationError("roots accepted")) as find:
+                with self.assertRaisesRegex(pm.GenerationError, "roots accepted"):
+                    pm.generate(args)
+                find.assert_called_once_with(out / "Winx64" / "LogFiles", "part", False)
+            args.src_root = self.root / "missing-source"
+            with self.assertRaisesRegex(pm.GenerationError, "SrcRoot directory does not exist"):
+                pm.generate(args)
+            args.src_root = src
+            args.out_root = self.root / "missing-output"
+            with self.assertRaisesRegex(pm.GenerationError, "OutRoot directory does not exist"):
+                pm.generate(args)
+
+    def test_configured_roots_expand_environment_and_fail_without_fallback_on_error(self):
+        repo = self.root / "repo"
+        src = self.root / "source"
+        out = repo / "bb" / "out"
+        src.mkdir()
+        out.mkdir(parents=True)
+        self.write("repo/bb/env.bat",
+            'set "SrcRoot=%CONVERT_TEST_ROOT%\\source"\n'
+            'set "OutRoot=%CONVERT_TEST_ROOT%\\repo\\bb\\out"\n')
+        args = pm.parser().parse_args([str(repo), "part", "--non-interactive"])
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(pm.GenerationError, "CONVERT_TEST_ROOT.*undefined or empty"):
+                pm.generate(args)
+        with patch.dict(os.environ, {"CONVERT_TEST_ROOT": str(self.root)}, clear=True):
+            with patch("project_maker.find_log", side_effect=pm.GenerationError("roots accepted")):
+                with self.assertRaisesRegex(pm.GenerationError, "roots accepted"):
+                    pm.generate(args)
+        with patch.dict(os.environ, {"SrcRoot": str(src), "OutRoot": str(self.root / "missing")}, clear=True):
+            with self.assertRaisesRegex(pm.GenerationError, "OutRoot directory does not exist"):
+                pm.generate(args)
+
     def test_partial_native_log_requests_rebuild_without_file_list(self):
         makefile = self.write("src/test.mke",
             "baseDir=$(_MakeFilePath)\n"
@@ -417,6 +480,55 @@ class ProjectMakerTests(unittest.TestCase):
         unit.sources.append(second)
         self.assertEqual(self.manifest(makefile).verify([unit]), 2)
 
+    def test_native_project_accepts_standard_user_property_sheet(self):
+        makefile = self.write("native/app.mke", "")
+        first = self.write("native/first.cpp")
+        second = self.write("native/second.cpp")
+        for imported in (r"$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props",
+                         "$(userrootdir)/microsoft.cpp.$(platform).USER.PROPS"):
+            with self.subTest(imported=imported):
+                project = self.write("native/app.vcxproj",
+                    f'<Project xmlns="{pm.NS}"><ItemGroup>'
+                    '<ClCompile Include="first.cpp"/><ClCompile Include="second.cpp"/>'
+                    '</ItemGroup><ImportGroup Label="PropertySheets">'
+                    f'<Import Project="{imported}" Condition="exists(\'{imported}\')" '
+                    'Label="LocalAppDataPlatform"/></ImportGroup></Project>')
+                unit = pm.Compilation("cpp", project.parent, sources=[first], project=project)
+                with self.assertRaisesRegex(pm.GenerationError, "full rebuild"):
+                    self.manifest(makefile).verify([unit])
+                unit.sources.append(second)
+                self.assertEqual(self.manifest(makefile).verify([unit]), 2)
+
+    def test_project_user_root_import_exception_is_not_a_wildcard(self):
+        makefile = self.write("native/app.mke", "")
+        source = self.write("native/first.cpp")
+        for imported in (r"$(UserRootDir)\custom.props",
+                         r"$(OtherRoot)\Microsoft.Cpp.$(Platform).user.props",
+                         r"$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props.extra"):
+            with self.subTest(imported=imported):
+                project = self.write("native/app.vcxproj",
+                    '<Project><ItemGroup><ClCompile Include="first.cpp"/></ItemGroup>'
+                    f'<Import Project="{imported}"/></Project>')
+                unit = pm.Compilation("cpp", project.parent, sources=[source], project=project)
+                with self.assertRaisesRegex(pm.GenerationError, "Cannot verify imported source items"):
+                    self.manifest(makefile).verify([unit])
+
+    def test_custom_property_sheet_sources_are_still_checked(self):
+        makefile = self.write("native/app.mke", "")
+        project = self.write("native/app.vcxproj",
+            '<Project><ItemGroup><ClCompile Include="first.cpp"/></ItemGroup>'
+            '<Import Project="$(UserRootDir)\\Microsoft.Cpp.$(Platform).user.props"/>'
+            '<Import Project="$(MSBuildThisFileDirectory)sources.props"/></Project>')
+        self.write("native/sources.props",
+            '<Project><ItemGroup><ClCompile Include="second.cpp"/></ItemGroup></Project>')
+        first = self.write("native/first.cpp")
+        second = self.write("native/second.cpp")
+        unit = pm.Compilation("cpp", project.parent, sources=[first], project=project)
+        with self.assertRaisesRegex(pm.GenerationError, "full rebuild"):
+            self.manifest(makefile).verify([unit])
+        unit.sources.append(second)
+        self.assertEqual(self.manifest(makefile).verify([unit]), 2)
+
     def test_csharp_without_csproj_checks_assembly_source_list(self):
         makefile = self.write("managed/app.mke",
             "baseDir=$(_MakeFilePath)\n"
@@ -446,6 +558,29 @@ class ProjectMakerTests(unittest.TestCase):
         self.assertIn("HideSolutionNode = FALSE", merged)
         self.assertEqual(merged.count(".Build.0"), 2)
         self.assertEqual(pm.merge_solution(merged, second), merged)
+
+    def test_shared_solution_accepts_visual_studio_leading_blank_lines(self):
+        existing = pm.solution([("old", r"projects\old.csproj", pm.CS_GUID)])
+        existing = existing.replace("# Visual Studio Version 17\n",
+            "# Visual Studio Version 17\nVisualStudioVersion = 17.14.37314.3 d17.14\n"
+            "MinimumVisualStudioVersion = 10.0.40219.1\n")
+        projects = [("new", r"projects\new.vcxproj", pm.CPP_GUID)]
+        for leading in ("\n", "\n\n"):
+            with self.subTest(leading=leading):
+                path = self.write("existing.sln", "")
+                path.write_bytes(b"\xef\xbb\xbf" + (leading + existing).replace("\n", "\r\n").encode("utf-8"))
+                text = pm.merge_solution(pm.read_text(path), projects, ("PS.26", "ProStructures"))
+                self.assertTrue(text.startswith(leading + "Microsoft Visual Studio Solution File"))
+                self.assertIn("VisualStudioVersion = 17.14.37314.3 d17.14", text)
+                self.assertIn("MinimumVisualStudioVersion = 10.0.40219.1", text)
+                self.assertIn(r"projects\old.csproj", text)
+                self.assertIn(r"projects\new.vcxproj", text)
+                self.assertEqual(pm.merge_solution(text, projects, ("PS.26", "ProStructures")), text)
+
+    def test_shared_solution_still_rejects_invalid_header(self):
+        for text in ("", "\nNot a solution\n", "\nMicrosoft Visual Studio Solution File, Format Version 11.00\n"):
+            with self.subTest(text=text), self.assertRaisesRegex(pm.GenerationError, "Unsupported MyBentley"):
+                pm.merge_solution(text, [])
 
     def test_csharp_source_list_from_local_include(self):
         makefile = self.write("managed/app.mke",

@@ -44,9 +44,13 @@ Use `--log <path>` or `--part-file <path>` to disambiguate explicitly.
 Junctions are followed with physical-directory cycle detection.
 
 Root configuration precedence: explicit `--out-root`/`--src-root`, environment,
-literal assignments in the selected project's `bb\env.bat`. Only OutRoot has a
+assignments in the selected project's `bb\env.bat`. Only OutRoot has a
 fallback: `<projectFolder>\bb\out`. Batch environment files are read, not
 executed during generation. SrcRoot must be configured; its value is never guessed.
+Both selected root directories must exist, including when a fallback is used.
+`%NAME%` references in paths are expanded from the current environment; an
+undefined or empty referenced variable is an error and stops generation.
+MSBuild properties such as `$(Platform)` are not environment-variable references.
 
 Open `MyBentley.sln` in Visual Studio 2022 with C++ desktop
 development tools and/or the matching .NET Framework targeting pack installed.
@@ -65,6 +69,8 @@ New project entries are appended,
 existing entries and other solution sections are retained, and regenerating a
 project does not duplicate its entry. Each Part is scheduled once for a solution
 build, including Parts with multiple generated projects.
+Solutions saved by Visual Studio with initial blank lines are accepted and
+retain those lines and their version metadata.
 
 Unmodified per-Part solutions created by the previous version are recognized
 automatically. Their project files, filters, debugger settings and build wrappers
@@ -128,6 +134,10 @@ dynamic source expressions, unsupported project item transforms and an unknown
 source list stop generation. Conditional declarations are checked conservatively
 across branches: a file absent from the log is not assumed inactive.
 Shared compiler inference rules are not treated as concrete source declarations.
+Standard MSBuild/Visual C++ toolchain imports and the VS template's
+`$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props` compiler-settings import
+are excluded from source-list traversal. Custom property sheets are still
+checked; unresolved custom imports stop generation.
 
 Relative paths are resolved using logged `cd` commands or the active MSBuild
 project. Missing sources, conflicting settings for a source and missing

@@ -76,10 +76,24 @@ def windows_args(command: str) -> list[str]:
     return args
 
 
+def environment_path(value: str | Path) -> Path:
+    def expand(text: str, stack: tuple[str, ...] = ()) -> str:
+        def replace(match):
+            name = match[1]
+            if name.casefold() in stack:
+                raise GenerationError(f"Recursive environment variable {name} in path: {value}")
+            content = os.environ.get(name)
+            if not content:
+                raise GenerationError(f"Environment variable {name} is undefined or empty in path: {value}")
+            return expand(content, (*stack, name.casefold()))
+        return re.sub(r"%([^%]+)%", replace, text)
+    return Path(expand(str(value)))
+
+
 def absolute(value: str, cwd: Path) -> Path:
-    if "$(" in value or re.search(r"%\w+%", value):
+    path = environment_path(value)
+    if "$(" in str(path):
         raise GenerationError(f"Unexpanded variable in logged path: {value}")
-    path = Path(value)
     return Path(os.path.abspath(path if path.is_absolute() else cwd / path))
 
 
@@ -478,6 +492,10 @@ class SourceManifest:
             if value.startswith(("$(MSBuildToolsPath)", "$(VCTargetsPath)",
                                  "$(MSBuildExtensionsPath)", "$(MSBuildExtensionsPath32)")):
                 continue
+            # The VS template's per-user compiler settings are another standard import.
+            if value.replace("/", "\\").casefold() == (
+                    r"$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props".casefold()):
+                continue
             value = value.replace("$(MSBuildThisFileDirectory)", str(path.parent) + os.sep)
             if "$" in value or any(c in value for c in "*?"):
                 raise GenerationError(f"Cannot verify imported source items: {value} in {path}")
@@ -785,7 +803,7 @@ SOLUTION_PROJECT = re.compile(
 def merge_solution(existing: str | None, projects: list[tuple[str, str, str]],
                    folders: tuple[str, ...] = ()) -> str:
     text = existing.replace("\r\n", "\n") if existing is not None else solution([])
-    if not text.startswith("Microsoft Visual Studio Solution File, Format Version 12.00"):
+    if not text.lstrip("\n").startswith("Microsoft Visual Studio Solution File, Format Version 12.00"):
         raise GenerationError("Unsupported MyBentley.sln format; the solution was not changed.")
     blocks = list(SOLUTION_PROJECT.finditer(text))
     additions: list[str] = []
@@ -899,7 +917,7 @@ def static_environment(repo: Path) -> dict[str, str]:
     path = repo / "bb" / "env.bat"
     if path.is_file():
         for line in read_text(path).splitlines():
-            match = re.match(r'(?i)^\s*set\s+"?(SrcRoot|OutRoot)=([^"%]+)"?\s*$', line)
+            match = re.match(r'(?i)^\s*set\s+"?(SrcRoot|OutRoot)=([^"]+?)"?\s*$', line)
             if match:
                 result[match[1].lower()] = match[2].strip()
     return result
@@ -946,7 +964,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--repository", help="Override the BB repository name (defaults to project folder name)")
     result.add_argument("--part-file", type=Path, help="Explicit PartFile.xml when ambiguous")
     result.add_argument("--out-root", type=Path, help="Default: OutRoot, bb/env.bat, then projectFolder/bb/out")
-    result.add_argument("--src-root", type=Path, help="Default: SrcRoot or a literal definition in bb/env.bat")
+    result.add_argument("--src-root", type=Path, help="Default: SrcRoot or a definition in bb/env.bat")
     result.add_argument("--log", type=Path, help="Explicit log file instead of recursive lookup")
     result.add_argument("--output", type=Path, help="Output directory (default: parent of ConvertBB2VS)")
     result.add_argument("--strategy", help="Argument passed to repository env.bat (defaults to repository name)")
@@ -961,20 +979,24 @@ def generate(args: argparse.Namespace) -> list[Path]:
     if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", args.part) or args.part.endswith("."):
         raise GenerationError("Part name must contain only letters, digits, underscores, dots or hyphens.")
     _, default_output = workspace_roots()
-    repo = Path(args.project_folder).resolve()
+    repo = environment_path(args.project_folder).resolve()
     if not repo.is_dir():
         raise GenerationError(f"Repository directory does not exist: {repo}")
     repository = args.repository or repo.name
     strategy = args.strategy or repository
     config = static_environment(repo)
-    out_root = (args.out_root or Path(os.environ.get("OutRoot") or config.get("outroot") or repo / "bb" / "out")).resolve()
+    out_root = environment_path(args.out_root or os.environ.get("OutRoot")
+                                or config.get("outroot") or repo / "bb" / "out").resolve()
     src_value = args.src_root or os.environ.get("SrcRoot") or config.get("srcroot")
     if not src_value:
         raise GenerationError("SrcRoot is undefined. Set it or pass --src-root; no value was assumed.")
-    src_root = Path(src_value).resolve()
+    src_root = environment_path(src_value).resolve()
+    for label, directory in (("SrcRoot", src_root), ("OutRoot", out_root)):
+        if not directory.is_dir():
+            raise GenerationError(f"{label} directory does not exist: {directory}")
     interactive = not args.non_interactive
-    log = args.log.resolve() if args.log else find_log(out_root / "Winx64" / "LogFiles", args.part, interactive)
-    explicit = args.part_file.resolve() if args.part_file else None
+    log = environment_path(args.log).resolve() if args.log else find_log(out_root / "Winx64" / "LogFiles", args.part, interactive)
+    explicit = environment_path(args.part_file).resolve() if args.part_file else None
     # Prefer the authoritative PartFile printed in this Part's own log.
     header = re.search(r"(?im)^\s*Building Part:\s*(.*?)\s+<([^>]+)>", read_text(log))
     if header:
@@ -990,7 +1012,7 @@ def generate(args: argparse.Namespace) -> list[Path]:
             if not path.is_file():
                 raise GenerationError(INCOMPLETE_LOG)
     if args.debug_exe:
-        args.debug_exe = args.debug_exe.resolve()
+        args.debug_exe = environment_path(args.debug_exe).resolve()
         if not args.debug_exe.is_file():
             raise GenerationError(f"Debugger host does not exist: {args.debug_exe}")
     name = definition.attrib["Name"]
@@ -1013,7 +1035,7 @@ def generate(args: argparse.Namespace) -> list[Path]:
         cs_name = name if not native and len(managed) == 1 else f"{name}.Managed{index + 1}"
         files.update(cs_project(cs_name, unit, unit.cwd, command, args.framework, args.debug_exe))
         projects.append((cs_name, cs_name + ".csproj", CS_GUID))
-    output = (args.output or default_output).resolve()
+    output = environment_path(args.output or default_output).resolve()
     project_dir = output / "projects"
     paths = [project_dir / filename for filename in files]
     existing = [p for p in paths if p.exists()]
