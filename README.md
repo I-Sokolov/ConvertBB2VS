@@ -99,12 +99,19 @@ migrated. A conflicting destination stops generation without overwriting it.
 The single `FromLog|x64` configuration represents captured settings. It does
 not fabricate Debug/Release configurations. C# retains its logged compiler
 platform (including AnyCPU) inside that solution configuration.
-Build, Rebuild and Clean invoke the real BentleyBuild Python entry point
-through its existing virtual environment, after `env.bat <strategy>`.
+The build wrapper first changes to the project folder and calls
+`env.bat <strategy>`, then invokes
+`uv run --frozen --directory "%SrcRoot%bentleybuild" bentleybuild.py re <Part> %1`.
+`uv` must be available on `PATH`; no direct `.venv\Scripts\python.exe` launcher
+is required. The build environment selects the repository and roots.
 Override that environment argument using `--strategy`.
 `--repository` and `--strategy` default to the selected project folder's name.
-BB receives the selected Part, its full PartFile path, configured roots, and
-`--noSubParts`: dependencies are not rebuilt. The solution schedules the Part
+`--repository` supplies the default strategy name when `--strategy` is omitted;
+it is not passed as a separate BB option.
+Build calls `call "$(ProjectDir)<Part>.build.cmd"` without arguments;
+Clean calls the same wrapper with `-c`. Rebuild runs Clean, then Build,
+stopping if Clean fails. This applies to both C++ and C# projects.
+The solution schedules the Part
 only once even when it contains multiple generated projects.
 C# design-time targets remain available, but normal builds never use Csc from
 the generated project.

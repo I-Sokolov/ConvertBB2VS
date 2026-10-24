@@ -144,8 +144,14 @@ class ProjectMakerTests(unittest.TestCase):
         files = pm.cpp_project("test", [unit, other], self.root, 'call "$(ProjectDir)test.build.cmd"', None)
         root = ET.fromstring(files["test.vcxproj"])
         ns = {"m": pm.NS}
+        self.assertEqual(root.find(".//m:NMakeBuildCommandLine", ns).text,
+                         'call "$(ProjectDir)test.build.cmd"')
+        self.assertEqual(root.find(".//m:NMakeCleanCommandLine", ns).text,
+                         'call "$(ProjectDir)test.build.cmd" -c')
         self.assertEqual(root.find(".//m:NMakeReBuildCommandLine", ns).text,
-                         'call "$(ProjectDir)test.build.cmd" rebuild')
+                         'call "$(ProjectDir)test.build.cmd" -c\n'
+                         'if errorlevel 1 exit /b %errorlevel%\n'
+                         'call "$(ProjectDir)test.build.cmd"')
         items = root.findall(".//m:ClCompile", ns)
         self.assertEqual(len(items), 3)
         self.assertEqual(items[0].find("m:PreprocessorDefinitions", ns).text, "FOO=1")
@@ -213,7 +219,10 @@ class ProjectMakerTests(unittest.TestCase):
         children = list(root)
         self.assertTrue(children[-4].tag.endswith("Import"))
         self.assertEqual([element.get("Name") for element in children[-3:]], ["Build", "Rebuild", "Clean"])
-        self.assertEqual(children[-3][0].get("Command"), "call app.build.cmd build")
+        self.assertEqual([e.get("Command") for e in children[-3]], ["call app.build.cmd"])
+        self.assertEqual([e.get("Command") for e in children[-2]],
+                         ["call app.build.cmd -c", "call app.build.cmd"])
+        self.assertEqual([e.get("Command") for e in children[-1]], ["call app.build.cmd -c"])
 
     def test_conflicting_native_settings_fail(self):
         first = pm.parse_compilation("cl", ["/DFIRST", "same.cpp"], self.root)
@@ -259,8 +268,7 @@ class ProjectMakerTests(unittest.TestCase):
         repo = bentley_root / "repo"
         src = repo / "bb" / "src"
         self.write("repo/env.bat", "@echo off\n")
-        self.write("repo/bb/src/BentleyBuild/.venv/Scripts/python.exe")
-        self.write("repo/bb/src/BentleyBuild/BentleyBuild.py")
+        src.mkdir(parents=True)
         part_file = self.write("repo/Triforma/Triforma.PartFile.xml",
             '<BuildContext><Part Name="tfelement" BMakeFile="src/tfelement/tfelement.mke"/></BuildContext>')
         makefile = self.write("repo/Triforma/src/tfelement/tfelement.mke",
@@ -301,10 +309,13 @@ class ProjectMakerTests(unittest.TestCase):
             if path.suffix in (".vcxproj", ".filters"):
                 ET.parse(path)
         wrapper = pm.read_text(output / "projects" / "tfelement.build.cmd")
-        self.assertIn('"--partName" "tfelement"', wrapper)
+        self.assertIn('uv run --frozen --directory "%SrcRoot%bentleybuild" '
+                      'bentleybuild.py re "tfelement" %1', wrapper)
         self.assertIn('call "' + str(repo / "env.bat") + '" "repo"', wrapper)
-        self.assertIn('"--noSubParts"', wrapper)
-        self.assertIn('"--outputroot"', wrapper)
+        self.assertNotIn("--noSubParts", wrapper)
+        self.assertNotIn("--outputroot", wrapper)
+        self.assertNotIn(".venv", wrapper)
+        self.assertLess(wrapper.index("pushd "), wrapper.index('call "'))
         self.assertIn('if errorlevel 1 exit /b %errorlevel%', wrapper)
         self.assertNotIn("DOSKEY", wrapper)
         self.assertEqual(pm.find_log(repo / "bb/out/Winx64/LogFiles", "tfelement", False), log)
@@ -342,6 +353,53 @@ class ProjectMakerTests(unittest.TestCase):
     def manifest(self, makefile):
         return pm.SourceManifest(makefile, self.root / "test.PartFile.xml",
                                  self.root / "bb" / "src", self.root / "bb" / "out")
+
+    @unittest.skipUnless(os.name == "nt", "Requires cmd.exe")
+    def test_build_wrapper_restores_directory_and_propagates_failures(self):
+        repo = self.root / "repo with spaces"
+        env = self.write("repo with spaces/env.bat",
+            '@echo off\n'
+            'echo env:%1:%CD%\nset "SrcRoot=C:\\fake-source\\"\nexit /b 0\n')
+        stub = self.write("fake bb.cmd",
+            '@echo off\necho bb:%1:%2:%3\nexit /b 17\n')
+        wrapper = pm.build_wrapper(repo, "part", "strategy")
+        wrapper = wrapper.replace(
+            'uv run --frozen --directory "%SrcRoot%bentleybuild" bentleybuild.py',
+            'call "' + str(stub) + '"')
+        script = self.write("part.build.cmd", wrapper)
+        driver = self.write("driver.cmd",
+            f'@echo off\ncall "{script}" %1\nset "saved=%errorlevel%"\n'
+            'echo restored:%CD%\nexit /b %saved%\n')
+        for argument in ("", "-c"):
+            with self.subTest(argument=argument):
+                result = subprocess.run([os.environ["ComSpec"], "/d", "/c", str(driver), argument],
+                                        cwd=self.root, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 17, result.stderr)
+                self.assertIn(f'env:"strategy":{repo}', result.stdout)
+                self.assertIn(f'bb:re:"part":{argument}', result.stdout)
+                self.assertIn(f"restored:{self.root}", result.stdout)
+        env.write_text("@echo off\nexit /b 23\n")
+        result = subprocess.run([os.environ["ComSpec"], "/d", "/c", str(driver)],
+                                cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 23, result.stderr)
+        self.assertNotIn("bb:", result.stdout)
+        self.assertIn(f"restored:{self.root}", result.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "Requires cmd.exe")
+    def test_rebuild_runs_build_only_after_successful_clean(self):
+        for clean_exit in (0, 19):
+            with self.subTest(clean_exit=clean_exit):
+                stub = self.write("fake project.cmd",
+                    '@echo off\nif "%~1"=="-c" (\n'
+                    f'echo clean\nexit /b {clean_exit}\n)\necho build\nexit /b 0\n')
+                commands = pm.build_commands(f'call "{stub}"')["Rebuild"]
+                driver = self.write("rebuild.cmd", "@echo off\n" +
+                    "\nif errorlevel 1 exit /b %errorlevel%\n".join(commands) + "\n")
+                result = subprocess.run([os.environ["ComSpec"], "/d", "/c", str(driver)],
+                                        cwd=self.root, capture_output=True, text=True)
+                self.assertEqual(result.returncode, clean_exit, result.stderr)
+                self.assertEqual(result.stdout.splitlines(),
+                                 ["clean", "build"] if clean_exit == 0 else ["clean"])
 
     def test_environment_paths_require_defined_nonempty_variables(self):
         for environment in ({}, {"CONVERT_TEST_ROOT": ""}):

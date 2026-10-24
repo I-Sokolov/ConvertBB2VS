@@ -637,8 +637,10 @@ def cpp_project(name: str, units: list[Compilation], source_root: Path, command:
     node(config_group, "PlatformToolset", "v143")
     node(root, "Import", Project=r"$(VCTargetsPath)\Microsoft.Cpp.props")
     properties = node(root, "PropertyGroup")
-    for action in ("Build", "ReBuild", "Clean"):
-        node(properties, f"NMake{action}CommandLine", command + " " + action.lower())
+    for action, commands in build_commands(command).items():
+        action = "ReBuild" if action == "Rebuild" else action
+        node(properties, f"NMake{action}CommandLine",
+             "\nif errorlevel 1 exit /b %errorlevel%\n".join(commands))
     node(properties, "OutDir", "$(ProjectDir).vs-output\\$(ProjectName)\\")
     node(properties, "IntDir", "$(ProjectDir).vs-output\\$(ProjectName)\\")
     node(properties, "NMakeIncludeSearchPath", mslist(units[0].includes))
@@ -771,10 +773,16 @@ def cs_project(name: str, unit: Compilation, source_root: Path, command: str,
             node(ref, "Aliases", alias)
     node(root, "Import", Project=r"$(MSBuildToolsPath)\Microsoft.CSharp.targets")
     # Override after the import: normal builds go to BB; design-time targets remain available.
-    for action in ("Build", "Rebuild", "Clean"):
+    for action, commands in build_commands(command).items():
         target = node(root, "Target", Name=action, Condition="'$(DesignTimeBuild)' != 'true'")
-        node(target, "Exec", Command=command + " " + action.lower())
+        for invocation in commands:
+            node(target, "Exec", Command=invocation)
     return {name + ".csproj": xml_text(root)}
+
+
+def build_commands(command: str) -> dict[str, list[str]]:
+    return {"Build": [command], "Rebuild": [command + " -c", command],
+            "Clean": [command + " -c"]}
 
 
 def solution(projects: list[tuple[str, str, str]]) -> str:
@@ -935,24 +943,25 @@ def workspace_roots() -> tuple[Path, Path]:
     return app_dir.parent.parent, app_dir.parent
 
 
-def build_wrapper(repo: Path, src_root: Path, out_root: Path, part_file: Path, part: str,
-                  strategy: str, repository: str) -> str:
-    python = src_root / "BentleyBuild" / ".venv" / "Scripts" / "python.exe"
-    bb = src_root / "BentleyBuild" / "BentleyBuild.py"
+def build_wrapper(repo: Path, part: str, strategy: str) -> str:
     env = repo / "env.bat"
-    for path in (python, bb, env):
-        if not path.is_file():
-            raise GenerationError(f"Required build launcher file is missing: {path}")
-    args = ["--repository", repository, "--partFile", str(part_file),
-            "--partName", part, "--srcroot", str(src_root), "--outputroot", str(out_root),
-            "--noSubParts"]
+    if not env.is_file():
+        raise GenerationError(f"Required build launcher file is missing: {env}")
     return "\n".join([
         "@echo off", "setlocal DisableDelayedExpansion",
-        'if /i not "%~1"=="build" if /i not "%~1"=="rebuild" if /i not "%~1"=="clean" exit /b 2',
-        f"call {batch_arg(str(env))} {batch_arg(strategy)}",
-        "if errorlevel 1 exit /b %errorlevel%",
+        'if not "%~1"=="" if /i not "%~1"=="-c" exit /b 2',
+        'if not "%~2"=="" exit /b 2',
         f"pushd {batch_arg(str(repo))}", "if errorlevel 1 exit /b %errorlevel%",
-        " ".join(batch_arg(v) for v in (str(python), str(bb), *args)) + ' "%~1"',
+        f"call {batch_arg(str(env))} {batch_arg(strategy)}",
+        'if errorlevel 1 goto finish',
+        'if not defined SrcRoot (',
+        '    echo error: SrcRoot is undefined after env.bat. 1>&2',
+        '    popd',
+        '    exit /b 1',
+        ')',
+        'uv run --frozen --directory "%SrcRoot%bentleybuild" bentleybuild.py re '
+        + batch_arg(part) + ' %1',
+        ':finish',
         'set "result=%errorlevel%"', "popd", "exit /b %result%", "",
     ])
 
@@ -961,7 +970,7 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("project_folder", help="Absolute project folder or path relative to the current working directory")
     result.add_argument("part", help="Part name, for example tfelement")
-    result.add_argument("--repository", help="Override the BB repository name (defaults to project folder name)")
+    result.add_argument("--repository", help="Default build-strategy name when --strategy is omitted (defaults to project folder name)")
     result.add_argument("--part-file", type=Path, help="Explicit PartFile.xml when ambiguous")
     result.add_argument("--out-root", type=Path, help="Default: OutRoot, bb/env.bat, then projectFolder/bb/out")
     result.add_argument("--src-root", type=Path, help="Default: SrcRoot or a definition in bb/env.bat")
@@ -1017,8 +1026,7 @@ def generate(args: argparse.Namespace) -> list[Path]:
             raise GenerationError(f"Debugger host does not exist: {args.debug_exe}")
     name = definition.attrib["Name"]
     files: dict[str, str] = {
-        name + ".build.cmd": build_wrapper(repo, src_root, out_root, part_file, name,
-                                          strategy, repository)
+        name + ".build.cmd": build_wrapper(repo, name, strategy)
     }
     command = 'call "$(ProjectDir)' + name + '.build.cmd"'
     projects: list[tuple[str, str, str]] = []
