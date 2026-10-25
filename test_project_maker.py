@@ -224,6 +224,24 @@ class ProjectMakerTests(unittest.TestCase):
                          ["call app.build.cmd -c", "call app.build.cmd"])
         self.assertEqual([e.get("Command") for e in children[-1]], ["call app.build.cmd -c"])
 
+    def test_csharp_declares_solution_configuration_for_visual_studio(self):
+        for platform in ("x64", "AnyCPU"):
+            with self.subTest(platform=platform):
+                unit = pm.Compilation("cs", self.root, platform=platform)
+                content = pm.cs_project("app", unit, self.root, "call app.build.cmd", "v4.8", None)
+                root = ET.fromstring(content["app.csproj"])
+                ns = {"m": pm.NS}
+                configurations = [group for group in root.findall("m:PropertyGroup", ns)
+                                  if group.get("Condition") ==
+                                  "'$(Configuration)|$(Platform)' == 'FromLog|x64'"]
+                self.assertEqual(len(configurations), 1)
+                self.assertEqual(configurations[0].find("m:OutputPath", ns).text, ".vs-output\\app\\")
+                for name, default in (("Configuration", "FromLog"), ("Platform", "x64")):
+                    element = root.find(f".//m:{name}", ns)
+                    self.assertEqual(element.text, default)
+                    self.assertEqual(element.get("Condition"), f"'$({name})' == ''")
+                self.assertEqual(root.find(".//m:PlatformTarget", ns).text, platform)
+
     def test_conflicting_native_settings_fail(self):
         first = pm.parse_compilation("cl", ["/DFIRST", "same.cpp"], self.root)
         second = pm.parse_compilation("cl", ["/DSECOND", "same.cpp"], self.root)

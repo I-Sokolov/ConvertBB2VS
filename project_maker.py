@@ -743,13 +743,15 @@ def cs_project(name: str, unit: Compilation, source_root: Path, command: str,
         raise GenerationError("This version supports C# .NET Framework projects; use e.g. --framework v4.8.")
     root = ET.Element(f"{{{NS}}}Project", ToolsVersion="Current", DefaultTargets="Build")
     props = node(root, "PropertyGroup")
+    node(props, "Configuration", "FromLog", Condition="'$(Configuration)' == ''")
+    node(props, "Platform", "x64", Condition="'$(Platform)' == ''")
     for key, value in {
-        "Configuration": "FromLog", "Platform": "x64", "ProjectGuid": guid(name),
+        "ProjectGuid": guid(name),
         "TargetFrameworkVersion": framework,
         "OutputType": {"library": "Library", "exe": "Exe", "winexe": "WinExe"}.get(unit.target, ""),
         "AssemblyName": Path(unit.output).stem if unit.output else name,
         "DefineConstants": mslist(unit.defines), "PlatformTarget": unit.platform or "AnyCPU",
-        "OutputPath": ".vs-output\\" + name + "\\", "BaseIntermediateOutputPath": ".vs-output\\" + name + "\\obj\\",
+        "BaseIntermediateOutputPath": ".vs-output\\" + name + "\\obj\\",
         "AllowUnsafeBlocks": str(unit.unsafe).lower(), "EnableDefaultItems": "false",
     }.items():
         node(props, key, value)
@@ -761,6 +763,9 @@ def cs_project(name: str, unit: Compilation, source_root: Path, command: str,
         node(props, "StartAction", "Program")
         node(props, "StartProgram", msbuild_escape(str(debug_exe)))
         node(props, "StartWorkingDirectory", msbuild_escape(str(debug_exe.parent)))
+    configuration = node(root, "PropertyGroup",
+                         Condition="'$(Configuration)|$(Platform)' == 'FromLog|x64'")
+    node(configuration, "OutputPath", ".vs-output\\" + name + "\\")
     sources = node(root, "ItemGroup")
     for path in unit.sources:
         linked_item(sources, "Compile", path, source_root)

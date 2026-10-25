@@ -99,6 +99,8 @@ migrated. A conflicting destination stops generation without overwriting it.
 The single `FromLog|x64` configuration represents captured settings. It does
 not fabricate Debug/Release configurations. C# retains its logged compiler
 platform (including AnyCPU) inside that solution configuration.
+C# projects explicitly declare `FromLog|x64` in a conditional property group so
+Visual Studio can discover the configuration and schedule the external build.
 The build wrapper first changes to the project folder and calls
 `env.bat <strategy>`, then invokes
 `uv run --frozen --directory "%SrcRoot%bentleybuild" bentleybuild.py re <Part> %1`.
