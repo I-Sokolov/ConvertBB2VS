@@ -377,9 +377,9 @@ class ProjectMakerTests(unittest.TestCase):
         repo = self.root / "repo with spaces"
         env = self.write("repo with spaces/env.bat",
             '@echo off\n'
-            'echo env:%1:%CD%\nset "SrcRoot=C:\\fake-source\\"\nexit /b 0\n')
+            'echo env:%1:%CD%\nset DEBUG=\nset "SrcRoot=C:\\fake-source\\"\nexit /b 0\n')
         stub = self.write("fake bb.cmd",
-            '@echo off\necho bb:%1:%2:%3\nexit /b 17\n')
+            '@echo off\necho bb:%1:%2:%3\necho debug:%DEBUG%\nexit /b 17\n')
         wrapper = pm.build_wrapper(repo, "part", "strategy")
         wrapper = wrapper.replace(
             'uv run --frozen --directory "%SrcRoot%bentleybuild" bentleybuild.py',
@@ -395,6 +395,7 @@ class ProjectMakerTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 17, result.stderr)
                 self.assertIn(f'env:"strategy":{repo}', result.stdout)
                 self.assertIn(f'bb:re:"part":{argument}', result.stdout)
+                self.assertIn("debug:1", result.stdout)
                 self.assertIn(f"restored:{self.root}", result.stdout)
         env.write_text("@echo off\nexit /b 23\n")
         result = subprocess.run([os.environ["ComSpec"], "/d", "/c", str(driver)],

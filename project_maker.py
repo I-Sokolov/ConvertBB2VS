@@ -964,6 +964,8 @@ def build_wrapper(repo: Path, part: str, strategy: str) -> str:
         '    popd',
         '    exit /b 1',
         ')',
+        'set DEBUG=1',
+        'set DO_IFC_TRACE=1',
         'uv run --frozen --directory "%SrcRoot%bentleybuild" bentleybuild.py re '
         + batch_arg(part) + ' %1',
         ':finish',

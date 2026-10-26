@@ -102,7 +102,7 @@ platform (including AnyCPU) inside that solution configuration.
 C# projects explicitly declare `FromLog|x64` in a conditional property group so
 Visual Studio can discover the configuration and schedule the external build.
 The build wrapper first changes to the project folder and calls
-`env.bat <strategy>`, then invokes
+`env.bat <strategy>`, sets `DEBUG=1` immediately before invoking
 `uv run --frozen --directory "%SrcRoot%bentleybuild" bentleybuild.py re <Part> %1`.
 `uv` must be available on `PATH`; no direct `.venv\Scripts\python.exe` launcher
 is required. The build environment selects the repository and roots.
